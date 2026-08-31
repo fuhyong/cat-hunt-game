@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+<!-- iOS Web App Meta Tags -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Adaptive Gecko">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>Adaptive Feline Engine</title>
+<style>
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  body, html {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #0b0f14;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  
+  #start-screen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(11, 15, 20, 0.95);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 200;
+  }
+  .btn {
+    background: #10b981;
+    color: white;
+    border: none;
+    padding: 18px 36px;
+    margin: 10px;
+    font-size: 1.3rem;
+    border-radius: 14px;
+    cursor: pointer;
+    font-weight: bold;
+    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+  }
+</style>
+</head>
+<body>
+
+<div id="start-screen">
+  <button class="btn" id="start-btn">Start Game (Enable Audio)</button>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  let isPaused = true; 
+  let scaleUnit = 1; 
+
+  // --- TELEMETRY & ADAPTIVE LEARNING ENGINE ---
+  const Telemetry = {
+    profile: null,
+    init() {
+      let data = localStorage.getItem('feline_app_identity');
+      if (!data) {
+        data = {
+          deviceId: (crypto.randomUUID) ? crypto.randomUUID() : 'cat_' + Date.now(),
+          trials: [] // History of catches and latencies
+        };
+      } else {
+        data = JSON.parse(data);
+      }
+      this.profile = data;
+    },
+    logTrial(params, latencyMs) {
+      // Shorter reaction time yields a higher reward score
+      const rewardScore = Math.max(0, 10000 - latencyMs); 
+      this.profile.trials.push({ ...params, rewardScore, timestamp: Date.now() });
+      
+      // Keep sliding window of latest 100 trials to optimize memory
+      if (this.profile.trials.length > 100) this.profile.trials.shift();
+      
+      localStorage.setItem('feline_app_identity', JSON.stringify(this.profile));
+    },
+    generateNextPreyParams() {
+      // Epsilon-Greedy: 20% random exploration, 80% exploitation of best traits
+      if (Math.random() < 0.2 || this.profile.trials.length < 5) {
+        return {
+          scaleMultiplier: Number((Math.random() * 0.7 + 0.7).toFixed(2)), // 0.7x to 1.4x
+          speedMultiplier: Number((Math.random() * 1.4 + 0.8).toFixed(2)), // 0.8x to 2.2x
+          hue: Math.floor(Math.random() * 180 + 60) // 60° (Yellow) to 240° (Blue)
+        };
+      } else {
+        // Exploit: Find the trial with highest reward score and add small mutation
+        const bestTrial = [...this.profile.trials].sort((a, b) => b.rewardScore - a.rewardScore)[0];
+        return {
+          scaleMultiplier: Math.max(0.65, Number((bestTrial.scaleMultiplier + (Math.random() * 0.2 - 0.1)).toFixed(2))),
+          speedMultiplier: Math.max(0.75, Number((bestTrial.speedMultiplier + (Math.random() * 0.4 - 0.2)).toFixed(2))),
+          hue: (bestTrial.hue + Math.floor(Math.random() * 20 - 10)) % 360
+        };
+      }
+    }
+  };
+  Telemetry.init();
+
+  // --- FELINE-TUNED AUDIO SYNTHESIZER ---
+  const AudioEngine = {
+    ctx: null,
+    init() {
+      if (!this.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AudioCtx();
+      }
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume();
+      }
+      // Audio buffer unlock for iOS WebKit
+      const buffer = this.ctx.createBuffer(1, 1, 22050);
+      const source = this.ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.ctx.destination);
+      source.start(0);
+    },
+    playSqueak(pitch = 4200) {
+      if (!this.ctx || this.ctx.state !== 'running') return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(pitch, this.ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(pitch + 1400, this.ctx.currentTime + 0.09);
+      gain.gain.setValueAtTime(0.06, this.ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.001, this.ctx.currentTime + 0.09);
+      osc.connect(gain); gain.connect(this.ctx.destination);
+      osc.start(); osc.stop(this.ctx.currentTime + 0.09);
+    },
+    playHit() {
+      if (!this.ctx || this.ctx.state !== 'running') return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(3200, this.ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(700, this.ctx.currentTime + 0.35);
+      gain.gain.setValueAtTime(0.12, this.ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.001, this.ctx.currentTime + 0.35);
+      osc.connect(gain); gain.connect(this.ctx.destination);
+      osc.start(); osc.stop(this.ctx.currentTime + 0.35);
+    },
+    playRustle() {
+      if (!this.ctx || this.ctx.state !== 'running' || Math.random() > 0.3) return;
+      const bufferSize = this.ctx.sampleRate * 0.04;
+      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+      const output = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) output[i] = Math.random() * 2 - 1;
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = buffer;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'highpass'; 
+      filter.frequency.value = 4500;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.015, this.ctx.currentTime); 
+      gain.gain.linearRampToValueAtTime(0.001, this.ctx.currentTime + 0.04);
+      noise.connect(filter); filter.connect(gain); gain.connect(this.ctx.destination);
+      noise.start();
+    }
+  };
+
+  function startSession() {
+    const docEl = document.documentElement;
+    if (docEl.requestFullscreen) docEl.requestFullscreen().catch(() => {});
+    else if (docEl.webkitRequestFullscreen) try { docEl.webkitRequestFullscreen(); } catch(e) {}
+    
+    AudioEngine.init();
+    document.getElementById('start-screen').style.display = 'none';
+    isPaused = false;
+  }
+
+  document.getElementById('start-btn').addEventListener('touchstart', startSession, { passive: true });
+  document.getElementById('start-btn').addEventListener('click', startSession);
+
+  // --- ENVIRONMENT (HIDING SPOTS) ---
+  const hidingSpots = [];
+  function generateHidingSpots() {
+    hidingSpots.length = 0;
+    const padRadius = scaleUnit * 50; 
+    for(let i = 0; i < 4; i++) {
+      hidingSpots.push({
+        x: Math.random() * (canvas.width - padRadius * 2) + padRadius,
+        y: Math.random() * (canvas.height - padRadius * 2) + padRadius,
+        radius: padRadius * (0.8 + Math.random() * 0.4),
+        shaking: false
+      });
+    }
+  }
+
+  function drawHidingSpots() {
+    hidingSpots.forEach(spot => {
+      ctx.save();
+      ctx.translate(spot.x, spot.y);
+      if (spot.shaking) {
+        ctx.translate(Math.sin(Date.now() / 25) * (scaleUnit * 2.5), Math.cos(Date.now() / 25) * (scaleUnit * 2.5));
+      }
+      ctx.fillStyle = '#142a1b'; 
+      ctx.beginPath();
+      ctx.arc(0, 0, spot.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  // --- PREY LOGIC (ADAPTIVE GECKO) ---
+  class Gecko {
+    constructor() {
+      this.reset();
+    }
+    
+    reset() {
+      this.params = Telemetry.generateNextPreyParams();
+      
+      this.x = Math.random() * (canvas.width - 200) + 100; 
+      this.y = Math.random() * (canvas.height - 200) + 100;
+      
+      this.baseSpeed = scaleUnit * 3.5 * this.params.speedMultiplier;
+      this.vx = this.baseSpeed; 
+      this.vy = this.baseSpeed; 
+      this.hue = this.params.hue;
+      this.sizeMult = this.params.scaleMultiplier;
+      
+      this.state = 'moving';
+      this.stateTimer = 0;
+      this.angle = 0;
+      this.legCycle = 0;
+      this.activeLeaf = null;
+      this.spawnTime = Date.now();
+    }
+    
+    update() {
+      if (this.state === 'caught') {
+        this.stateTimer--;
+        this.angle += (Math.random() - 0.5) * 0.7; 
+        this.legCycle += 1.4; 
+        
+        if (this.stateTimer <= 0) {
+          this.reset();
+        }
+        return;
+      }
+
+      if (this.state === 'hiding') {
+        this.stateTimer--;
+        if (this.activeLeaf) this.activeLeaf.shaking = true;
+        if (this.stateTimer <= 0) {
+          this.state = 'moving';
+          if (this.activeLeaf) this.activeLeaf.shaking = false;
+          this.activeLeaf = null;
+          this.vx = (Math.random() - 0.5) * (this.baseSpeed * 3.5);
+          this.vy = (Math.random() - 0.5) * (this.baseSpeed * 3.5);
+          this.spawnTime = Date.now(); 
+          AudioEngine.playSqueak(4600);
+        }
+        return;
+      }
+
+      if (this.state === 'frozen') {
+        this.stateTimer--;
+        if (this.stateTimer <= 0) {
+          this.state = 'moving';
+          this.vx = (Math.random() - 0.5) * (this.baseSpeed * 2.2);
+          this.vy = (Math.random() - 0.5) * (this.baseSpeed * 2.2);
+        }
+        return;
+      }
+
+      if (this.state === 'moving') {
+        this.legCycle += 0.45 * this.params.speedMultiplier; 
+        AudioEngine.playRustle(); 
+        
+        if (Math.random() < 0.02) AudioEngine.playSqueak();
+        
+        if (Math.random() < 0.012) {
+          this.state = 'frozen';
+          this.stateTimer = Math.random() * 50 + 25;
+          return;
+        }
+
+        this.x += this.vx; 
+        this.y += this.vy;
+        this.angle = Math.atan2(this.vy, this.vx);
+
+        if (Math.random() < 0.05) {
+          for (let spot of hidingSpots) {
+            let dist = Math.hypot(this.x - spot.x, this.y - spot.y);
+            if (dist < spot.radius * 0.7) {
+              this.state = 'hiding';
+              this.stateTimer = Math.random() * 200 + 100;
+              this.activeLeaf = spot;
+              return;
+            }
+          }
+        }
+
+        const boundPad = -scaleUnit * 40 * this.sizeMult;
+        if (this.x < boundPad) this.vx = Math.abs(this.vx) + 0.5; 
+        if (this.x > canvas.width - boundPad) this.vx = -Math.abs(this.vx) - 0.5; 
+        if (this.y < boundPad) this.vy = Math.abs(this.vy) + 0.5; 
+        if (this.y > canvas.height - boundPad) this.vy = -Math.abs(this.vy) - 0.5; 
+      }
+    }
+    
+    draw() {
+      if (this.state === 'hiding') return; 
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      ctx.fillStyle = `hsl(${this.hue}, 90%, 60%)`;
+      ctx.strokeStyle = `hsl(${this.hue}, 90%, 60%)`;
+      ctx.lineWidth = Math.max(2, scaleUnit * 3.5 * this.sizeMult);
+
+      if (this.state === 'caught') {
+        ctx.scale(1.1, 0.7); 
+        ctx.fillStyle = '#ef4444'; 
+      }
+
+      const drawScale = scaleUnit * this.sizeMult;
+      const legSwing = (this.state === 'moving' || this.state === 'caught') ? Math.sin(this.legCycle) * (drawScale * 6) : 0;
+      
+      ctx.beginPath(); ctx.moveTo(drawScale * 4, -drawScale * 4); ctx.lineTo(drawScale * 8 + legSwing, -drawScale * 12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(drawScale * 4, drawScale * 4); ctx.lineTo(drawScale * 8 - legSwing, drawScale * 12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-drawScale * 4, -drawScale * 4); ctx.lineTo(-drawScale * 8 - legSwing, -drawScale * 12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-drawScale * 4, drawScale * 4); ctx.lineTo(-drawScale * 8 + legSwing, drawScale * 12); ctx.stroke();
+
+      const tailSwish = (this.state === 'moving' || this.state === 'caught') ? Math.sin(this.legCycle * 0.8) * (drawScale * 10) : 0;
+      ctx.beginPath();
+      ctx.moveTo(-drawScale * 12, 0);
+      ctx.quadraticCurveTo(-drawScale * 20, tailSwish, -drawScale * 28, 0);
+      ctx.stroke();
+
+      ctx.beginPath(); ctx.ellipse(0, 0, drawScale * 14, drawScale * 7, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(drawScale * 12, 0, drawScale * 7, drawScale * 5, 0, 0, Math.PI * 2); ctx.fill();
+
+      ctx.restore();
+    }
+    
+    checkHit(px, py) {
+      if (this.state === 'caught' || this.state === 'hiding') return;
+      let dist = Math.hypot(this.x - px, this.y - py);
+      
+      if (dist < scaleUnit * 45 * this.sizeMult) { 
+        this.state = 'caught';
+        this.stateTimer = 90; 
+        
+        // Save interaction telemetry
+        const latency = Date.now() - this.spawnTime;
+        Telemetry.logTrial(this.params, latency);
+        
+        AudioEngine.playHit();
+      }
+    }
+  }
+
+  const gecko = new Gecko();
+
+  function handleInteraction(e) {
+    if (!isPaused) {
+      AudioEngine.init();
+      gecko.checkHit(e.clientX || (e.touches && e.touches[0].clientX), e.clientY || (e.touches && e.touches[0].clientY));
+    }
+  }
+
+  canvas.addEventListener('pointerdown', handleInteraction);
+  canvas.addEventListener('touchstart', handleInteraction, { passive: true });
+
+  function resize() { 
+    canvas.width = window.innerWidth; 
+    canvas.height = window.innerHeight; 
+    scaleUnit = Math.max(0.75, Math.min(canvas.width, canvas.height) / 480);
+    generateHidingSpots();
+  }
+  window.addEventListener('resize', resize); 
+  resize();
+
+  function loop() {
+    if (!isPaused) {
+      ctx.fillStyle = '#080d14';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      gecko.update();
+      gecko.draw(); 
+      drawHidingSpots(); 
+    }
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
