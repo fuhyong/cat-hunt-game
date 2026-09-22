@@ -30,7 +30,7 @@
     width: 100vw;
     height: 100vh;
   }
-  
+
   #start-screen {
     position: fixed;
     top: 0;
@@ -67,11 +67,24 @@
 <canvas id="gameCanvas"></canvas>
 
 <script>
+/*
+ * v1.4 — engine fixes (see project review for full rationale):
+ *   1. Reward now scores sustained engagement (interaction attempts per chase),
+ *      not raw catch speed — a slow/easy catch no longer outscores a hard-won one.
+ *   2. Fixed-timestep simulation — gameplay speed no longer depends on the
+ *      device's display refresh rate (60Hz vs 120Hz previously played differently).
+ *   3. Exploitation step now averages the top-K trials (with a proper circular
+ *      mean for hue) instead of anchoring on a single historical best trial.
+ *   4. Touch detection now checks a short window of recent prey positions,
+ *      not just the instantaneous one, and a secondary DeviceMotion channel
+ *      is logged (not yet used to trigger hits) so real pounce sensitivity
+ *      can be validated against video before it's trusted for gameplay.
+ */
 (() => {
   const canvas = document.getElementById('gameCanvas');
   const ctx = canvas.getContext('2d');
-  let isPaused = true; 
-  let scaleUnit = 1; 
+  let isPaused = true;
+  let scaleUnit = 1;
 
   // --- TELEMETRY & ADAPTIVE LEARNING ENGINE ---
   const Telemetry = {
@@ -81,22 +94,47 @@
       if (!data) {
         data = {
           deviceId: (crypto.randomUUID) ? crypto.randomUUID() : 'cat_' + Date.now(),
-          trials: [] // History of catches and latencies
+          trials: [] // History of catches: params + engagement score + diagnostics
         };
       } else {
         data = JSON.parse(data);
       }
       this.profile = data;
     },
-    logTrial(params, latencyMs) {
-      // Shorter reaction time yields a higher reward score
-      const rewardScore = Math.max(0, 10000 - latencyMs); 
-      this.profile.trials.push({ ...params, rewardScore, timestamp: Date.now() });
-      
+    // meta: { attempts, latencyMs, motionCorroborated }
+    logTrial(params, meta) {
+      // Reward = sustained interaction during the chase, capped so a long
+      // run of frantic misses doesn't dominate a genuinely well-matched one.
+      const cappedAttempts = Math.max(1, Math.min(meta.attempts, 8));
+      const rewardScore = cappedAttempts * 1000;
+
+      this.profile.trials.push({
+        ...params,
+        rewardScore,
+        attempts: meta.attempts,
+        latencyMs: meta.latencyMs,           // kept for diagnostics only — not used as reward
+        motionCorroborated: meta.motionCorroborated,
+        timestamp: Date.now()
+      });
+
       // Keep sliding window of latest 100 trials to optimize memory
       if (this.profile.trials.length > 100) this.profile.trials.shift();
-      
+
       localStorage.setItem('feline_app_identity', JSON.stringify(this.profile));
+    },
+    // Circular mean so hues near the 0/360 wraparound (e.g. 350° and 10°)
+    // average to ~0° instead of being pulled toward 180° by a naive mean.
+    _circularMeanHue(hues) {
+      let sumSin = 0, sumCos = 0;
+      hues.forEach(h => {
+        const rad = h * Math.PI / 180;
+        sumSin += Math.sin(rad);
+        sumCos += Math.cos(rad);
+      });
+      let meanRad = Math.atan2(sumSin / hues.length, sumCos / hues.length);
+      let meanDeg = meanRad * 180 / Math.PI;
+      if (meanDeg < 0) meanDeg += 360;
+      return meanDeg;
     },
     generateNextPreyParams() {
       // Epsilon-Greedy: 20% random exploration, 80% exploitation of best traits
@@ -107,12 +145,22 @@
           hue: Math.floor(Math.random() * 180 + 60) // 60° (Yellow) to 240° (Blue)
         };
       } else {
-        // Exploit: Find the trial with highest reward score and add small mutation
-        const bestTrial = [...this.profile.trials].sort((a, b) => b.rewardScore - a.rewardScore)[0];
+        // Exploit: average the top-K trials rather than anchoring on a
+        // single historical best (which is highly sensitive to one lucky
+        // outlier — the "winner's curse" problem). K scales gently with
+        // how much data we have.
+        const sorted = [...this.profile.trials].sort((a, b) => b.rewardScore - a.rewardScore);
+        const k = Math.max(1, Math.min(5, Math.ceil(sorted.length * 0.3)));
+        const topK = sorted.slice(0, k);
+
+        const avgScale = topK.reduce((s, t) => s + t.scaleMultiplier, 0) / topK.length;
+        const avgSpeed = topK.reduce((s, t) => s + t.speedMultiplier, 0) / topK.length;
+        const avgHue = this._circularMeanHue(topK.map(t => t.hue));
+
         return {
-          scaleMultiplier: Math.max(0.65, Number((bestTrial.scaleMultiplier + (Math.random() * 0.2 - 0.1)).toFixed(2))),
-          speedMultiplier: Math.max(0.75, Number((bestTrial.speedMultiplier + (Math.random() * 0.4 - 0.2)).toFixed(2))),
-          hue: (bestTrial.hue + Math.floor(Math.random() * 20 - 10)) % 360
+          scaleMultiplier: Math.max(0.65, Number((avgScale + (Math.random() * 0.2 - 0.1)).toFixed(2))),
+          speedMultiplier: Math.max(0.75, Number((avgSpeed + (Math.random() * 0.4 - 0.2)).toFixed(2))),
+          hue: Math.round((avgHue + (Math.random() * 20 - 10) + 360) % 360)
         };
       }
     }
@@ -170,13 +218,55 @@
       const noise = this.ctx.createBufferSource();
       noise.buffer = buffer;
       const filter = this.ctx.createBiquadFilter();
-      filter.type = 'highpass'; 
+      filter.type = 'highpass';
       filter.frequency.value = 4500;
       const gain = this.ctx.createGain();
-      gain.gain.setValueAtTime(0.015, this.ctx.currentTime); 
+      gain.gain.setValueAtTime(0.015, this.ctx.currentTime);
       gain.gain.linearRampToValueAtTime(0.001, this.ctx.currentTime + 0.04);
       noise.connect(filter); filter.connect(gain); gain.connect(this.ctx.destination);
       noise.start();
+    }
+  };
+
+  // --- SECONDARY DETECTION CHANNEL (diagnostic only, not yet a hit trigger) ---
+  // Capacitive touchscreens miss a meaningful fraction of genuine cat-paw
+  // strikes. A DeviceMotion transient is a corroborating signal, logged
+  // alongside touch data so real sensitivity/specificity can be measured
+  // against video before this channel is trusted to influence gameplay.
+  const MotionSense = {
+    recentSpikes: [],       // timestamps (ms) of recent acceleration transients
+    baseline: 9.8,          // running estimate of resting |acceleration|
+    enabled: false,
+    init() {
+      const attach = () => {
+        window.addEventListener('devicemotion', (e) => this._onMotion(e), { passive: true });
+        this.enabled = true;
+      };
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        // iOS 13+ requires this to be called from a user-gesture handler.
+        DeviceMotionEvent.requestPermission().then(state => {
+          if (state === 'granted') attach();
+        }).catch(() => {});
+      } else if (typeof DeviceMotionEvent !== 'undefined') {
+        attach();
+      }
+    },
+    _onMotion(e) {
+      const a = e.accelerationIncludingGravity || e.acceleration;
+      if (!a || a.x === null) return;
+      const mag = Math.sqrt((a.x || 0) ** 2 + (a.y || 0) ** 2 + (a.z || 0) ** 2);
+      // Slow-adapting baseline so a spike is judged against "resting", not zero.
+      this.baseline = this.baseline * 0.95 + mag * 0.05;
+      if (mag - this.baseline > 6) {
+        const now = Date.now();
+        this.recentSpikes.push(now);
+        // keep only the last ~2s of spikes
+        this.recentSpikes = this.recentSpikes.filter(t => now - t < 2000);
+      }
+    },
+    hasRecentSpike(withinMs = 150) {
+      const now = Date.now();
+      return this.recentSpikes.some(t => now - t <= withinMs);
     }
   };
 
@@ -184,8 +274,9 @@
     const docEl = document.documentElement;
     if (docEl.requestFullscreen) docEl.requestFullscreen().catch(() => {});
     else if (docEl.webkitRequestFullscreen) try { docEl.webkitRequestFullscreen(); } catch(e) {}
-    
+
     AudioEngine.init();
+    MotionSense.init();
     document.getElementById('start-screen').style.display = 'none';
     isPaused = false;
   }
@@ -197,7 +288,7 @@
   const hidingSpots = [];
   function generateHidingSpots() {
     hidingSpots.length = 0;
-    const padRadius = scaleUnit * 50; 
+    const padRadius = scaleUnit * 50;
     for(let i = 0; i < 4; i++) {
       hidingSpots.push({
         x: Math.random() * (canvas.width - padRadius * 2) + padRadius,
@@ -215,7 +306,7 @@
       if (spot.shaking) {
         ctx.translate(Math.sin(Date.now() / 25) * (scaleUnit * 2.5), Math.cos(Date.now() / 25) * (scaleUnit * 2.5));
       }
-      ctx.fillStyle = '#142a1b'; 
+      ctx.fillStyle = '#142a1b';
       ctx.beginPath();
       ctx.arc(0, 0, spot.radius, 0, Math.PI * 2);
       ctx.fill();
@@ -228,33 +319,50 @@
     constructor() {
       this.reset();
     }
-    
+
     reset() {
       this.params = Telemetry.generateNextPreyParams();
-      
-      this.x = Math.random() * (canvas.width - 200) + 100; 
+
+      this.x = Math.random() * (canvas.width - 200) + 100;
       this.y = Math.random() * (canvas.height - 200) + 100;
-      
+
       this.baseSpeed = scaleUnit * 3.5 * this.params.speedMultiplier;
-      this.vx = this.baseSpeed; 
-      this.vy = this.baseSpeed; 
+      this.vx = this.baseSpeed;
+      this.vy = this.baseSpeed;
       this.hue = this.params.hue;
       this.sizeMult = this.params.scaleMultiplier;
-      
+
       this.state = 'moving';
       this.stateTimer = 0;
       this.angle = 0;
       this.legCycle = 0;
       this.activeLeaf = null;
       this.spawnTime = Date.now();
+
+      // Engagement tracking for the current chase (reset per gecko life-cycle,
+      // i.e. per catch — see checkHit()).
+      this.attemptsThisChase = 0;
+
+      // Short position history so a fast-moving target is still catchable
+      // even if the touch event lands a beat after the visual strike.
+      this.positionHistory = [];
     }
-    
+
     update() {
+      // Record position history every tick regardless of state (used for the
+      // widened temporal hit-test below). One tick == one fixed-timestep step,
+      // so this history's real-world duration is now device-independent too.
+      this.positionHistory.push({ x: this.x, y: this.y, t: Date.now() });
+      const cutoff = Date.now() - 200;
+      while (this.positionHistory.length && this.positionHistory[0].t < cutoff) {
+        this.positionHistory.shift();
+      }
+
       if (this.state === 'caught') {
         this.stateTimer--;
-        this.angle += (Math.random() - 0.5) * 0.7; 
-        this.legCycle += 1.4; 
-        
+        this.angle += (Math.random() - 0.5) * 0.7;
+        this.legCycle += 1.4;
+
         if (this.stateTimer <= 0) {
           this.reset();
         }
@@ -270,7 +378,7 @@
           this.activeLeaf = null;
           this.vx = (Math.random() - 0.5) * (this.baseSpeed * 3.5);
           this.vy = (Math.random() - 0.5) * (this.baseSpeed * 3.5);
-          this.spawnTime = Date.now(); 
+          this.spawnTime = Date.now();
           AudioEngine.playSqueak(4600);
         }
         return;
@@ -280,6 +388,9 @@
         this.stateTimer--;
         if (this.stateTimer <= 0) {
           this.state = 'moving';
+          this.spawnTime = Date.now(); // was previously not reset here — inflated
+                                        // the (now-diagnostic-only) latency figure
+                                        // by however long the freeze lasted.
           this.vx = (Math.random() - 0.5) * (this.baseSpeed * 2.2);
           this.vy = (Math.random() - 0.5) * (this.baseSpeed * 2.2);
         }
@@ -287,18 +398,18 @@
       }
 
       if (this.state === 'moving') {
-        this.legCycle += 0.45 * this.params.speedMultiplier; 
-        AudioEngine.playRustle(); 
-        
+        this.legCycle += 0.45 * this.params.speedMultiplier;
+        AudioEngine.playRustle();
+
         if (Math.random() < 0.02) AudioEngine.playSqueak();
-        
+
         if (Math.random() < 0.012) {
           this.state = 'frozen';
           this.stateTimer = Math.random() * 50 + 25;
           return;
         }
 
-        this.x += this.vx; 
+        this.x += this.vx;
         this.y += this.vy;
         this.angle = Math.atan2(this.vy, this.vx);
 
@@ -315,15 +426,15 @@
         }
 
         const boundPad = -scaleUnit * 40 * this.sizeMult;
-        if (this.x < boundPad) this.vx = Math.abs(this.vx) + 0.5; 
-        if (this.x > canvas.width - boundPad) this.vx = -Math.abs(this.vx) - 0.5; 
-        if (this.y < boundPad) this.vy = Math.abs(this.vy) + 0.5; 
-        if (this.y > canvas.height - boundPad) this.vy = -Math.abs(this.vy) - 0.5; 
+        if (this.x < boundPad) this.vx = Math.abs(this.vx) + 0.5;
+        if (this.x > canvas.width - boundPad) this.vx = -Math.abs(this.vx) - 0.5;
+        if (this.y < boundPad) this.vy = Math.abs(this.vy) + 0.5;
+        if (this.y > canvas.height - boundPad) this.vy = -Math.abs(this.vy) - 0.5;
       }
     }
-    
+
     draw() {
-      if (this.state === 'hiding') return; 
+      if (this.state === 'hiding') return;
 
       ctx.save();
       ctx.translate(this.x, this.y);
@@ -334,13 +445,13 @@
       ctx.lineWidth = Math.max(2, scaleUnit * 3.5 * this.sizeMult);
 
       if (this.state === 'caught') {
-        ctx.scale(1.1, 0.7); 
-        ctx.fillStyle = '#ef4444'; 
+        ctx.scale(1.1, 0.7);
+        ctx.fillStyle = '#ef4444';
       }
 
       const drawScale = scaleUnit * this.sizeMult;
       const legSwing = (this.state === 'moving' || this.state === 'caught') ? Math.sin(this.legCycle) * (drawScale * 6) : 0;
-      
+
       ctx.beginPath(); ctx.moveTo(drawScale * 4, -drawScale * 4); ctx.lineTo(drawScale * 8 + legSwing, -drawScale * 12); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(drawScale * 4, drawScale * 4); ctx.lineTo(drawScale * 8 - legSwing, drawScale * 12); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-drawScale * 4, -drawScale * 4); ctx.lineTo(-drawScale * 8 - legSwing, -drawScale * 12); ctx.stroke();
@@ -357,21 +468,42 @@
 
       ctx.restore();
     }
-    
+
+    // Called on every interaction while the gecko is catchable, whether or
+    // not it actually lands — this is what makes attempt-counting possible.
+    // Returns true if this attempt was a successful catch.
     checkHit(px, py) {
-      if (this.state === 'caught' || this.state === 'hiding') return;
-      let dist = Math.hypot(this.x - px, this.y - py);
-      
-      if (dist < scaleUnit * 45 * this.sizeMult) { 
+      if (this.state === 'caught' || this.state === 'hiding') return false;
+
+      this.attemptsThisChase++;
+
+      // Check against the gecko's recent position history (last ~120ms), not
+      // just its current instantaneous position — a fast-moving target can
+      // have moved meaningfully between a genuine paw strike and the event
+      // actually firing.
+      const recentCutoff = Date.now() - 120;
+      const candidates = this.positionHistory.filter(p => p.t >= recentCutoff);
+      if (candidates.length === 0) candidates.push({ x: this.x, y: this.y });
+
+      const hitRadius = scaleUnit * 45 * this.sizeMult;
+      const hit = candidates.some(p => Math.hypot(p.x - px, p.y - py) < hitRadius);
+
+      if (hit) {
         this.state = 'caught';
-        this.stateTimer = 90; 
-        
-        // Save interaction telemetry
+        this.stateTimer = 90;
+
         const latency = Date.now() - this.spawnTime;
-        Telemetry.logTrial(this.params, latency);
-        
+        const motionCorroborated = MotionSense.hasRecentSpike(150);
+        Telemetry.logTrial(this.params, {
+          attempts: this.attemptsThisChase,
+          latencyMs: latency,
+          motionCorroborated
+        });
+
         AudioEngine.playHit();
+        return true;
       }
+      return false;
     }
   }
 
@@ -387,27 +519,55 @@
   canvas.addEventListener('pointerdown', handleInteraction);
   canvas.addEventListener('touchstart', handleInteraction, { passive: true });
 
-  function resize() { 
-    canvas.width = window.innerWidth; 
-    canvas.height = window.innerHeight; 
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
     scaleUnit = Math.max(0.75, Math.min(canvas.width, canvas.height) / 480);
     generateHidingSpots();
   }
-  window.addEventListener('resize', resize); 
+  window.addEventListener('resize', resize);
   resize();
 
-  function loop() {
+  // --- FIXED-TIMESTEP SIMULATION LOOP ---
+  // gecko.update() is now called at a fixed, wall-clock-locked rate (one
+  // tick ≈ 1000/60 ms of real time) via this accumulator, regardless of how
+  // often requestAnimationFrame actually fires. On a 120Hz display this
+  // calls update() twice per rendered frame instead of once; on 60Hz, once
+  // as before. Movement, state timers and per-tick probabilities were all
+  // tuned assuming "one update per ~16.7ms", so this is what makes that
+  // assumption true everywhere instead of only on 60Hz hardware.
+  const FIXED_DT_MS = 1000 / 60;
+  const MAX_STEPS_PER_FRAME = 5; // avoid a "spiral of death" after e.g. the tab was backgrounded
+  let lastFrameTime = null;
+  let accumulatorMs = 0;
+
+  function loop(timestamp) {
     if (!isPaused) {
+      if (lastFrameTime === null) lastFrameTime = timestamp;
+      let frameDelta = timestamp - lastFrameTime;
+      lastFrameTime = timestamp;
+      if (frameDelta > 250) frameDelta = 250; // clamp huge gaps rather than catching up all at once
+
+      accumulatorMs += frameDelta;
+      let steps = 0;
+      while (accumulatorMs >= FIXED_DT_MS && steps < MAX_STEPS_PER_FRAME) {
+        gecko.update();
+        accumulatorMs -= FIXED_DT_MS;
+        steps++;
+      }
+      if (steps === MAX_STEPS_PER_FRAME) accumulatorMs = 0; // drop backlog instead of spiraling
+
       ctx.fillStyle = '#080d14';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      gecko.update();
-      gecko.draw(); 
-      drawHidingSpots(); 
+
+      gecko.draw();
+      drawHidingSpots();
+    } else {
+      lastFrameTime = null; // avoid a huge delta the instant the game resumes
     }
     requestAnimationFrame(loop);
   }
-  loop();
+  requestAnimationFrame(loop);
 })();
 </script>
 </body>
