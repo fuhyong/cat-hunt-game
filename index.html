@@ -863,7 +863,7 @@
       ctx.translate(this.x, this.y);
       ctx.rotate(this.angle);
 
-      ctx.strokeStyle = `hsl(${this.hue}, 85%, 30%)`;
+      ctx.strokeStyle = `hsl(${this.hue}, 55%, 46%)`;
       ctx.lineWidth = Math.max(1.5, drawScale * 2.2);
 
       if (this.state === 'caught') {
@@ -896,12 +896,12 @@
       // compact than the gecko's elongated body+head, same directional
       // shading kit.
       if (this.state !== 'caught') {
-        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, -drawScale * 7, 0, drawScale * 6, drawScale * 4.5, drawScale * 16);
+        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, -drawScale * 7, 0, drawScale * 6, drawScale * 4.5, drawScale * 16, { lightL: 82, midL: 60, darkL: 38, sat: [45, 65, 58] });
       }
       ctx.beginPath(); ctx.ellipse(-drawScale * 7, 0, drawScale * 11, drawScale * 9, 0, 0, Math.PI * 2); ctx.fill();
 
       if (this.state !== 'caught') {
-        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, drawScale * 7, 0, drawScale * 3, drawScale * 2.5, drawScale * 9);
+        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, drawScale * 7, 0, drawScale * 3, drawScale * 2.5, drawScale * 9, { lightL: 82, midL: 60, darkL: 38, sat: [45, 65, 58] });
       }
       ctx.beginPath(); ctx.ellipse(drawScale * 7, 0, drawScale * 6, drawScale * 5.5, 0, 0, Math.PI * 2); ctx.fill();
 
@@ -948,7 +948,7 @@
         ctx.fill();
       });
 
-      ctx.strokeStyle = `hsl(${this.hue}, 60%, 25%)`;
+      ctx.strokeStyle = `hsl(${this.hue}, 50%, 40%)`;
       ctx.lineWidth = Math.max(1, drawScale * 1.2);
       [-1, 1].forEach(side => {
         ctx.beginPath();
