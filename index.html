@@ -574,7 +574,12 @@
   }
 
   // --- PREY LOGIC (ADAPTIVE GECKO) ---
-  class Gecko {
+  class Prey {
+    // Defaults tuned for the original gecko silhouette; a subclass with a
+    // meaningfully different footprint (see Spider) overrides these.
+    static HIT_RADIUS_MULT = 45;
+    static BOUND_PAD_MULT = 40;
+
     constructor() {
       this.reset();
     }
@@ -598,7 +603,7 @@
       this.activeLeaf = null;
       this.spawnTime = Date.now();
 
-      // Engagement tracking for the current chase (reset per gecko life-cycle,
+      // Engagement tracking for the current chase (reset per prey life-cycle,
       // i.e. per catch — see checkHit()).
       this.attemptsThisChase = 0;
 
@@ -623,7 +628,7 @@
         this.legCycle += 1.4;
 
         if (this.stateTimer <= 0) {
-          this.reset();
+          return 'respawn'; // caller decides the next creature -- see spawnPrey()
         }
         return;
       }
@@ -684,7 +689,7 @@
           }
         }
 
-        const boundPad = -scaleUnit * 40 * this.sizeMult;
+        const boundPad = -scaleUnit * this.constructor.BOUND_PAD_MULT * this.sizeMult;
         if (this.x < boundPad) this.vx = Math.abs(this.vx) + 0.5;
         if (this.x > canvas.width - boundPad) this.vx = -Math.abs(this.vx) - 0.5;
         if (this.y < boundPad) this.vy = Math.abs(this.vy) + 0.5;
@@ -692,27 +697,56 @@
       }
     }
 
+    // Called on every interaction while the gecko is catchable, whether or
+    // not it actually lands — this is what makes attempt-counting possible.
+    // Returns true if this attempt was a successful catch.
+    checkHit(px, py) {
+      if (this.state === 'caught' || this.state === 'hiding') return false;
+
+      this.attemptsThisChase++;
+
+      // Check against the gecko's recent position history (last ~120ms), not
+      // just its current instantaneous position — a fast-moving target can
+      // have moved meaningfully between a genuine paw strike and the event
+      // actually firing.
+      const recentCutoff = Date.now() - 120;
+      const candidates = this.positionHistory.filter(p => p.t >= recentCutoff);
+      if (candidates.length === 0) candidates.push({ x: this.x, y: this.y });
+
+      const hitRadius = scaleUnit * this.constructor.HIT_RADIUS_MULT * this.sizeMult;
+      const hit = candidates.some(p => Math.hypot(p.x - px, p.y - py) < hitRadius);
+
+      if (hit) {
+        this.state = 'caught';
+        this.stateTimer = 90;
+
+        const latency = Date.now() - this.spawnTime;
+        const motionCorroborated = MotionSense.hasRecentSpike(150);
+        Telemetry.logTrial(this.params, {
+          attempts: this.attemptsThisChase,
+          latencyMs: latency,
+          motionCorroborated
+        });
+
+        AudioEngine.playHit();
+        sessionCatchCount++;
+        return true;
+      }
+      return false;
+    }
+  }
+
+
+  class Gecko extends Prey {
     draw() {
       if (this.state === 'hiding') return;
 
-      // Soft ground-contact shadow, drawn in world space (it doesn't spin
-      // with the gecko, same as a real shadow on the floor wouldn't). This
-      // is a bigger "it's not just floating on the background" cue than
-      // the body shading below, and it's nearly free. Skipped during the
-      // caught flash, which already has its own strong feedback.
+      // Soft ground-contact shadow -- shared across every prey species (see
+      // drawPreyGroundShadow()), since standing on the floor needs the same
+      // cue regardless of silhouette. Skipped during the caught flash.
       if (this.state !== 'caught') {
         const shadowScale = scaleUnit * this.sizeMult;
-        const shadowCx = this.x;
-        const shadowCy = this.y + shadowScale * 3;
-        const shadowGrad = ctx.createRadialGradient(shadowCx, shadowCy, 0, shadowCx, shadowCy, shadowScale * 15);
-        shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.32)');
-        shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        ctx.save();
-        ctx.fillStyle = shadowGrad;
-        ctx.beginPath();
-        ctx.ellipse(shadowCx, shadowCy, shadowScale * 15, shadowScale * 5, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
+        drawPreyGroundShadow(this.x, this.y + shadowScale * 3, shadowScale);
       }
 
       ctx.save();
@@ -742,28 +776,12 @@
       ctx.stroke();
 
       if (this.state !== 'caught') {
-        const light = lightInLocalFrame(this.angle);
-        const bodyGrad = ctx.createRadialGradient(
-          light.x * drawScale * 7, light.y * drawScale * 3.5, 0,
-          0, 0, drawScale * 18
-        );
-        bodyGrad.addColorStop(0, `hsl(${this.hue}, 55%, 78%)`);
-        bodyGrad.addColorStop(0.55, `hsl(${this.hue}, 88%, 55%)`);
-        bodyGrad.addColorStop(1, `hsl(${this.hue}, 92%, 22%)`);
-        ctx.fillStyle = bodyGrad;
+        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, 0, 0, drawScale * 7, drawScale * 3.5, drawScale * 18);
       }
       ctx.beginPath(); ctx.ellipse(0, 0, drawScale * 14, drawScale * 7, 0, 0, Math.PI * 2); ctx.fill();
 
       if (this.state !== 'caught') {
-        const light = lightInLocalFrame(this.angle);
-        const headGrad = ctx.createRadialGradient(
-          drawScale * 12 + light.x * drawScale * 4, light.y * drawScale * 2.5, 0,
-          drawScale * 12, 0, drawScale * 10
-        );
-        headGrad.addColorStop(0, `hsl(${this.hue}, 55%, 78%)`);
-        headGrad.addColorStop(0.55, `hsl(${this.hue}, 88%, 55%)`);
-        headGrad.addColorStop(1, `hsl(${this.hue}, 92%, 22%)`);
-        ctx.fillStyle = headGrad;
+        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, drawScale * 12, 0, drawScale * 4, drawScale * 2.5, drawScale * 10);
       }
       ctx.beginPath(); ctx.ellipse(drawScale * 12, 0, drawScale * 7, drawScale * 5, 0, 0, Math.PI * 2); ctx.fill();
 
@@ -777,15 +795,7 @@
         ctx.ellipse(0, 0, drawScale * 14, drawScale * 7, 0, 0, Math.PI * 2);
         ctx.ellipse(drawScale * 12, 0, drawScale * 7, drawScale * 5, 0, 0, Math.PI * 2);
         ctx.clip();
-        ctx.strokeStyle = `hsla(${this.hue}, 70%, 25%, 0.32)`;
-        ctx.lineWidth = Math.max(1, drawScale * 1.0);
-        [-9, -4, 1, 6].forEach(k => {
-          const sx = drawScale * k;
-          ctx.beginPath();
-          ctx.moveTo(sx, -drawScale * 6.5);
-          ctx.lineTo(sx, drawScale * 6.5);
-          ctx.stroke();
-        });
+        drawSkinBanding(this.hue, drawScale, [-9, -4, 1, 6]);
         ctx.restore();
       }
 
@@ -827,52 +837,146 @@
 
       ctx.restore();
     }
+  }
 
-    // Called on every interaction while the gecko is catchable, whether or
-    // not it actually lands — this is what makes attempt-counting possible.
-    // Returns true if this attempt was a successful catch.
-    checkHit(px, py) {
-      if (this.state === 'caught' || this.state === 'hiding') return false;
+  // A second prey species reusing the shared Prey behavior model and
+  // render kit -- built for cats (and owners) who might prefer something
+  // other than a gecko, and to prove out the split: everything below is
+  // silhouette/charm-detail code, no game logic. Styled after a jumping
+  // spider (big forward-facing eyes) rather than a realistic one, on
+  // purpose -- the goal is a second FRIENDLY option, not something more
+  // off-putting than the gecko it's meant to be an alternative to.
+  class Spider extends Prey {
+    static HIT_RADIUS_MULT = 42;
+    static BOUND_PAD_MULT = 38;
 
-      this.attemptsThisChase++;
+    draw() {
+      if (this.state === 'hiding') return;
 
-      // Check against the gecko's recent position history (last ~120ms), not
-      // just its current instantaneous position — a fast-moving target can
-      // have moved meaningfully between a genuine paw strike and the event
-      // actually firing.
-      const recentCutoff = Date.now() - 120;
-      const candidates = this.positionHistory.filter(p => p.t >= recentCutoff);
-      if (candidates.length === 0) candidates.push({ x: this.x, y: this.y });
+      const drawScale = scaleUnit * this.sizeMult;
 
-      const hitRadius = scaleUnit * 45 * this.sizeMult;
-      const hit = candidates.some(p => Math.hypot(p.x - px, p.y - py) < hitRadius);
-
-      if (hit) {
-        this.state = 'caught';
-        this.stateTimer = 90;
-
-        const latency = Date.now() - this.spawnTime;
-        const motionCorroborated = MotionSense.hasRecentSpike(150);
-        Telemetry.logTrial(this.params, {
-          attempts: this.attemptsThisChase,
-          latencyMs: latency,
-          motionCorroborated
-        });
-
-        AudioEngine.playHit();
-        sessionCatchCount++;
-        return true;
+      if (this.state !== 'caught') {
+        drawPreyGroundShadow(this.x, this.y + drawScale * 3, drawScale, 16, 6);
       }
-      return false;
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      ctx.strokeStyle = `hsl(${this.hue}, 85%, 30%)`;
+      ctx.lineWidth = Math.max(1.5, drawScale * 2.2);
+
+      if (this.state === 'caught') {
+        ctx.scale(1.1, 0.7);
+        ctx.fillStyle = '#ef4444';
+      }
+
+      // Eight legs in two rows of four, swept back from a compact body --
+      // a doubled, rearranged version of the gecko's paired-leg pattern
+      // rather than a new leg system.
+      const legSwing = (this.state === 'moving' || this.state === 'caught') ? Math.sin(this.legCycle) * (drawScale * 4) : 0;
+      [
+        [drawScale * 3, -drawScale * 4, drawScale * 11, -drawScale * 13],
+        [drawScale * 3, drawScale * 4, drawScale * 11, drawScale * 13],
+        [-drawScale * 1, -drawScale * 5, drawScale * 6, -drawScale * 15],
+        [-drawScale * 1, drawScale * 5, drawScale * 6, drawScale * 15],
+        [-drawScale * 5, -drawScale * 5, -drawScale * 3, -drawScale * 15],
+        [-drawScale * 5, drawScale * 5, -drawScale * 3, drawScale * 15],
+        [-drawScale * 9, -drawScale * 4, -drawScale * 12, -drawScale * 12],
+        [-drawScale * 9, drawScale * 4, -drawScale * 12, drawScale * 12],
+      ].forEach(([hx, hy, fx, fy], i) => {
+        const swing = (i % 2 === 0 ? legSwing : -legSwing);
+        ctx.beginPath();
+        ctx.moveTo(hx, hy);
+        ctx.lineTo(fx + swing, fy);
+        ctx.stroke();
+      });
+
+      // Abdomen (rear) and cephalothorax (front) -- rounder and more
+      // compact than the gecko's elongated body+head, same directional
+      // shading kit.
+      if (this.state !== 'caught') {
+        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, -drawScale * 7, 0, drawScale * 6, drawScale * 4.5, drawScale * 16);
+      }
+      ctx.beginPath(); ctx.ellipse(-drawScale * 7, 0, drawScale * 11, drawScale * 9, 0, 0, Math.PI * 2); ctx.fill();
+
+      if (this.state !== 'caught') {
+        ctx.fillStyle = directionalBodyGradient(this.hue, this.angle, drawScale * 7, 0, drawScale * 3, drawScale * 2.5, drawScale * 9);
+      }
+      ctx.beginPath(); ctx.ellipse(drawScale * 7, 0, drawScale * 6, drawScale * 5.5, 0, 0, Math.PI * 2); ctx.fill();
+
+      // Faint dorsal pattern on the abdomen only -- reuses the same banding
+      // helper as the gecko's skin, just clipped and positioned differently.
+      if (this.state !== 'caught') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.ellipse(-drawScale * 7, 0, drawScale * 11, drawScale * 9, 0, 0, Math.PI * 2);
+        ctx.clip();
+        drawSkinBanding(this.hue, drawScale, [-14, -9, -4], 8, 0.28);
+        ctx.restore();
+      }
+
+      // Charm details: two big forward-facing eyes (jumping-spider-cute,
+      // not realistic) plus two small secondary eye-dots, and a pair of
+      // short chelicerae -- purely cosmetic, same spirit as the gecko's
+      // googly eyes/speckles.
+      const eyeOffsetX = drawScale * 10;
+      const eyeOffsetY = drawScale * 3;
+      const eyeRadius = drawScale * (this.state === 'caught' ? 3.2 : 2.4);
+      const pupilRadius = eyeRadius * 0.5;
+      const moveAngle = Math.atan2(this.vy, this.vx);
+      const pupilDrift = eyeRadius * 0.3;
+      const pdx = Math.cos(moveAngle - this.angle) * pupilDrift;
+      const pdy = Math.sin(moveAngle - this.angle) * pupilDrift;
+
+      [-1, 1].forEach(side => {
+        const ex = eyeOffsetX;
+        const ey = eyeOffsetY * side;
+        ctx.beginPath();
+        ctx.fillStyle = '#f5f5f0';
+        ctx.ellipse(ex, ey, eyeRadius, eyeRadius, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.fillStyle = '#1a1a1a';
+        ctx.ellipse(ex + pdx, ey + pdy, pupilRadius, pupilRadius, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // secondary eye-dot -- a small nod to "spiders have more than two eyes"
+        ctx.beginPath();
+        ctx.fillStyle = '#1a1a1a';
+        ctx.ellipse(ex - eyeRadius * 0.6, ey * 1.25, eyeRadius * 0.35, eyeRadius * 0.35, 0, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.strokeStyle = `hsl(${this.hue}, 60%, 25%)`;
+      ctx.lineWidth = Math.max(1, drawScale * 1.2);
+      [-1, 1].forEach(side => {
+        ctx.beginPath();
+        ctx.moveTo(drawScale * 12, side * drawScale * 1.5);
+        ctx.quadraticCurveTo(drawScale * 14, side * drawScale * 3, drawScale * 13, side * drawScale * 4.5);
+        ctx.stroke();
+      });
+
+      ctx.restore();
     }
   }
 
-  const gecko = new Gecko();
+  // Two species sharing one adaptive-learning profile and one behavior
+  // model (see Prey above) -- only the renderer differs. Picking randomly
+  // on each respawn (the 'respawn' signal from Prey.update()) is what
+  // actually varies things across a session, rather than needing a
+  // species-select UI to exist before this is even testable.
+  const PREY_SPECIES = [Gecko, Spider];
+  function spawnPrey() {
+    const SpeciesClass = PREY_SPECIES[Math.floor(Math.random() * PREY_SPECIES.length)];
+    return new SpeciesClass();
+  }
+  let activePrey = spawnPrey();
 
   function handleInteraction(e) {
     if (!isPaused) {
       AudioEngine.init();
-      gecko.checkHit(e.clientX || (e.touches && e.touches[0].clientX), e.clientY || (e.touches && e.touches[0].clientY));
+      activePrey.checkHit(e.clientX || (e.touches && e.touches[0].clientX), e.clientY || (e.touches && e.touches[0].clientY));
     }
   }
 
@@ -938,7 +1042,7 @@
   resize();
 
   // --- FIXED-TIMESTEP SIMULATION LOOP ---
-  // gecko.update() is now called at a fixed, wall-clock-locked rate (one
+  // activePrey.update() is now called at a fixed, wall-clock-locked rate (one
   // tick ≈ 1000/60 ms of real time) via this accumulator, regardless of how
   // often requestAnimationFrame actually fires. On a 120Hz display this
   // calls update() twice per rendered frame instead of once; on 60Hz, once
@@ -966,7 +1070,8 @@
       accumulatorMs += frameDelta;
       let steps = 0;
       while (accumulatorMs >= FIXED_DT_MS && steps < MAX_STEPS_PER_FRAME) {
-        gecko.update();
+        const preySignal = activePrey.update();
+        if (preySignal === 'respawn') activePrey = spawnPrey();
         accumulatorMs -= FIXED_DT_MS;
         steps++;
       }
@@ -976,7 +1081,7 @@
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       drawCornerFoliage();
 
-      gecko.draw();
+      activePrey.draw();
       drawHidingSpots();
     } else {
       lastFrameTime = null; // avoid a huge delta the instant the game resumes
