@@ -176,6 +176,13 @@
   const ctx = canvas.getContext('2d');
   let isPaused = true;
   let scaleUnit = 1;
+  // Cached radial gradient + static corner foliage: purely a background
+  // polish pass for the human watching over the cat's shoulder. Both are
+  // built once per resize (not per frame) and both stay low-contrast/no-
+  // motion on purpose so they don't compete with the gecko or hiding spots
+  // for the cat's attention -- see drawCornerFoliage()/updateBackgroundGradient().
+  let bgGradient = null;
+  const cornerFoliage = [];
 
   // --- SESSION STRUCTURE ---
   const SESSION_DURATION_MS = 6 * 60 * 1000; // placeholder default -- tune once
@@ -247,7 +254,21 @@
         // single historical best (which is highly sensitive to one lucky
         // outlier — the "winner's curse" problem). K scales gently with
         // how much data we have.
-        const sorted = [...this.profile.trials].sort((a, b) => b.rewardScore - a.rewardScore);
+        // Shuffle a copy before sorting so ties in rewardScore (very common --
+        // cappedAttempts only takes ~8 distinct integer values, so many
+        // trials land on the exact same score) don't deterministically
+        // favor whichever trial happened to be logged first. Array.sort is
+        // stable, so without this, "top K" was quietly always the oldest
+        // trials at a given score -- and since hue has no causal link to
+        // reward, topK's averaged hue just echoed whatever hue those old
+        // trials happened to have. That's what made the gecko's color look
+        // "stuck" on one value (usually green) for very long stretches.
+        const shuffled = [...this.profile.trials];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        const sorted = shuffled.sort((a, b) => b.rewardScore - a.rewardScore);
         const k = Math.max(1, Math.min(5, Math.ceil(sorted.length * 0.3)));
         const topK = sorted.slice(0, k);
 
@@ -770,6 +791,55 @@
     canvas.height = window.innerHeight;
     scaleUnit = Math.max(0.75, Math.min(canvas.width, canvas.height) / 480);
     generateHidingSpots();
+    updateBackgroundGradient();
+    generateCornerFoliage();
+  }
+
+  // Replaces the old flat #080d14 fill. A subtle center-to-edge gradient
+  // reads as "designed" to a human glancing at the screen while staying
+  // dark and low-contrast everywhere the gecko/leaves actually move --
+  // the two stops are close in lightness on purpose.
+  function updateBackgroundGradient() {
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const r = Math.max(canvas.width, canvas.height) * 0.75;
+    bgGradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    bgGradient.addColorStop(0, '#0d141c');
+    bgGradient.addColorStop(1, '#05080c');
+  }
+
+  // Four large, static, very-low-opacity leaves anchored to the corners --
+  // reuses drawLeafShape() so the foliage motif is consistent with the
+  // hiding spots. Static (no shake, no re-randomization per frame) and
+  // faint enough to stay well below the hiding spots and gecko in visual
+  // weight, so it adds finish for the owner without adding any new motion
+  // or contrast cue for the cat to key off of.
+  function generateCornerFoliage() {
+    cornerFoliage.length = 0;
+    const r = scaleUnit * 90;
+    const corners = [
+      { x: 0, y: 0, rotation: 0.4 },
+      { x: canvas.width, y: 0, rotation: Math.PI - 0.4 },
+      { x: 0, y: canvas.height, rotation: -0.4 },
+      { x: canvas.width, y: canvas.height, rotation: Math.PI + 0.4 }
+    ];
+    corners.forEach(c => {
+      cornerFoliage.push({ x: c.x, y: c.y, radius: r, rotation: c.rotation, lobeSkew: 0.7 });
+    });
+  }
+
+  function drawCornerFoliage() {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#15301f';
+    cornerFoliage.forEach(leaf => {
+      ctx.save();
+      ctx.translate(leaf.x, leaf.y);
+      ctx.rotate(leaf.rotation);
+      drawLeafShape(leaf.radius, leaf.lobeSkew);
+      ctx.restore();
+    });
+    ctx.restore();
   }
   window.addEventListener('resize', resize);
   resize();
@@ -809,8 +879,9 @@
       }
       if (steps === MAX_STEPS_PER_FRAME) accumulatorMs = 0; // drop backlog instead of spiraling
 
-      ctx.fillStyle = '#080d14';
+      ctx.fillStyle = bgGradient;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      drawCornerFoliage();
 
       gecko.draw();
       drawHidingSpots();
