@@ -184,6 +184,20 @@
   let bgGradient = null;
   const cornerFoliage = [];
 
+  // Fixed world-space "sun" used for all subtle directional shading below
+  // (gecko body/head, hiding leaves, corner foliage) so the scene reads as
+  // one consistently-lit tableau instead of flat cut-out sprites. It never
+  // moves; only whatever is drawn under it rotates, which is what makes a
+  // flat-filled shape look like it has volume as it turns.
+  const LIGHT_ANGLE_WORLD = -Math.PI * 0.75; // upper-left, like a window over the owner's shoulder
+  const LIGHT_VEC = { x: Math.cos(LIGHT_ANGLE_WORLD), y: Math.sin(LIGHT_ANGLE_WORLD) };
+  // Expresses the fixed world light in an object's own local (pre-rotation)
+  // coordinates -- the inverse of what ctx.rotate(angle) does to points.
+  function lightInLocalFrame(angle) {
+    const ca = Math.cos(-angle), sa = Math.sin(-angle);
+    return { x: LIGHT_VEC.x * ca - LIGHT_VEC.y * sa, y: LIGHT_VEC.y * ca + LIGHT_VEC.x * sa };
+  }
+
   // --- SESSION STRUCTURE ---
   const SESSION_DURATION_MS = 6 * 60 * 1000; // placeholder default -- tune once
                                               // real session-length data exists
@@ -530,6 +544,21 @@
     });
   }
 
+  // A soft directional highlight from the same fixed world light used on
+  // the gecko, so every leaf in the scene is lit consistently rather than
+  // flat-filled. baseHue/baseSat/baseL approximate the previous flat color.
+  function leafFillStyle(radius, angle, baseHue, baseSat, baseL) {
+    const light = lightInLocalFrame(angle);
+    const grad = ctx.createRadialGradient(
+      light.x * radius * 0.45, light.y * radius * 0.45, 0,
+      0, 0, radius * 1.3
+    );
+    grad.addColorStop(0, `hsl(${baseHue}, ${Math.max(0, baseSat - 18)}%, ${baseL + 22}%)`);
+    grad.addColorStop(0.6, `hsl(${baseHue}, ${baseSat}%, ${baseL}%)`);
+    grad.addColorStop(1, `hsl(${baseHue}, ${baseSat}%, ${Math.max(0, baseL - 6)}%)`);
+    return grad;
+  }
+
   function drawHidingSpots() {
     hidingSpots.forEach(spot => {
       ctx.save();
@@ -538,7 +567,7 @@
         ctx.translate(Math.sin(Date.now() / 25) * (scaleUnit * 2.5), Math.cos(Date.now() / 25) * (scaleUnit * 2.5));
       }
       ctx.rotate(spot.rotation);
-      ctx.fillStyle = '#142a1b';
+      ctx.fillStyle = leafFillStyle(spot.radius, spot.rotation, 140, 35, 13);
       drawLeafShape(spot.radius, spot.lobeSkew);
       ctx.restore();
     });
@@ -666,11 +695,30 @@
     draw() {
       if (this.state === 'hiding') return;
 
+      // Soft ground-contact shadow, drawn in world space (it doesn't spin
+      // with the gecko, same as a real shadow on the floor wouldn't). This
+      // is a bigger "it's not just floating on the background" cue than
+      // the body shading below, and it's nearly free. Skipped during the
+      // caught flash, which already has its own strong feedback.
+      if (this.state !== 'caught') {
+        const shadowScale = scaleUnit * this.sizeMult;
+        const shadowCx = this.x;
+        const shadowCy = this.y + shadowScale * 3;
+        const shadowGrad = ctx.createRadialGradient(shadowCx, shadowCy, 0, shadowCx, shadowCy, shadowScale * 15);
+        shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.32)');
+        shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.save();
+        ctx.fillStyle = shadowGrad;
+        ctx.beginPath();
+        ctx.ellipse(shadowCx, shadowCy, shadowScale * 15, shadowScale * 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
       ctx.save();
       ctx.translate(this.x, this.y);
       ctx.rotate(this.angle);
 
-      ctx.fillStyle = `hsl(${this.hue}, 90%, 60%)`;
       ctx.strokeStyle = `hsl(${this.hue}, 90%, 60%)`;
       ctx.lineWidth = Math.max(2, scaleUnit * 3.5 * this.sizeMult);
 
@@ -693,8 +741,53 @@
       ctx.quadraticCurveTo(-drawScale * 20, tailSwish, -drawScale * 28, 0);
       ctx.stroke();
 
+      if (this.state !== 'caught') {
+        const light = lightInLocalFrame(this.angle);
+        const bodyGrad = ctx.createRadialGradient(
+          light.x * drawScale * 7, light.y * drawScale * 3.5, 0,
+          0, 0, drawScale * 18
+        );
+        bodyGrad.addColorStop(0, `hsl(${this.hue}, 55%, 78%)`);
+        bodyGrad.addColorStop(0.55, `hsl(${this.hue}, 88%, 55%)`);
+        bodyGrad.addColorStop(1, `hsl(${this.hue}, 92%, 22%)`);
+        ctx.fillStyle = bodyGrad;
+      }
       ctx.beginPath(); ctx.ellipse(0, 0, drawScale * 14, drawScale * 7, 0, 0, Math.PI * 2); ctx.fill();
+
+      if (this.state !== 'caught') {
+        const light = lightInLocalFrame(this.angle);
+        const headGrad = ctx.createRadialGradient(
+          drawScale * 12 + light.x * drawScale * 4, light.y * drawScale * 2.5, 0,
+          drawScale * 12, 0, drawScale * 10
+        );
+        headGrad.addColorStop(0, `hsl(${this.hue}, 55%, 78%)`);
+        headGrad.addColorStop(0.55, `hsl(${this.hue}, 88%, 55%)`);
+        headGrad.addColorStop(1, `hsl(${this.hue}, 92%, 22%)`);
+        ctx.fillStyle = headGrad;
+      }
       ctx.beginPath(); ctx.ellipse(drawScale * 12, 0, drawScale * 7, drawScale * 5, 0, 0, Math.PI * 2); ctx.fill();
+
+      // Faint skin banding -- clipped to the body+head silhouette so it
+      // never spills past the edge. Kept low-opacity so the solid hue
+      // stays the primary read for the cat; this is a human-facing detail
+      // only, and skipped during the caught flash.
+      if (this.state !== 'caught') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.ellipse(0, 0, drawScale * 14, drawScale * 7, 0, 0, Math.PI * 2);
+        ctx.ellipse(drawScale * 12, 0, drawScale * 7, drawScale * 5, 0, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.strokeStyle = `hsla(${this.hue}, 70%, 25%, 0.32)`;
+        ctx.lineWidth = Math.max(1, drawScale * 1.0);
+        [-9, -4, 1, 6].forEach(k => {
+          const sx = drawScale * k;
+          ctx.beginPath();
+          ctx.moveTo(sx, -drawScale * 6.5);
+          ctx.lineTo(sx, drawScale * 6.5);
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
 
       // --- Charm details for the human owner -- purely cosmetic, same hue
       // family and body silhouette as before, so this doesn't touch the
@@ -831,11 +924,11 @@
   function drawCornerFoliage() {
     ctx.save();
     ctx.globalAlpha = 0.5;
-    ctx.fillStyle = '#15301f';
     cornerFoliage.forEach(leaf => {
       ctx.save();
       ctx.translate(leaf.x, leaf.y);
       ctx.rotate(leaf.rotation);
+      ctx.fillStyle = leafFillStyle(leaf.radius, leaf.rotation, 140, 39, 14);
       drawLeafShape(leaf.radius, leaf.lobeSkew);
       ctx.restore();
     });
