@@ -399,12 +399,50 @@
         this.recentSpikes.push(now);
         // keep only the last ~2s of spikes
         this.recentSpikes = this.recentSpikes.filter(t => now - t < 2000);
+        DebugLog.log('motion_spike', { magnitude: Math.round(mag * 100) / 100, baseline: Math.round(this.baseline * 100) / 100 });
       }
     },
     hasRecentSpike(withinMs = 150) {
       const now = Date.now();
       return this.recentSpikes.some(t => now - t <= withinMs);
     }
+  };
+
+  // --- SESSION DEBUG LOG (temporary -- for validating touch/motion
+  // detection against filmed video, per the technical review's UAT step).
+  // Records every motion-sensor spike AND every touch/pointer attempt,
+  // independent of each other, so a genuine pounce the touchscreen missed
+  // entirely is still visible here as a motion_spike with no matching
+  // touch_hit/touch_miss nearby -- the thing the app couldn't previously
+  // show at all. Timestamps are milliseconds since the session started.
+  // After filming, connect the device to a Mac, open Safari's Web
+  // Inspector on this page, and either read the live console output or
+  // run exportDebugLog() in the console to get the full timestamped list
+  // (also console.table'd for easy reading, and mirrored to localStorage
+  // as feline_debug_log so it survives even if the console wasn't open).
+  const DebugLog = {
+    events: [],
+    sessionStartTime: null,
+    start() {
+      this.events = [];
+      this.sessionStartTime = Date.now();
+    },
+    log(type, detail) {
+      if (this.sessionStartTime === null) return;
+      const t = Date.now() - this.sessionStartTime;
+      this.events.push({ t, type, ...detail });
+      console.log(`[debug ${(t / 1000).toFixed(2)}s] ${type}`, detail || '');
+    },
+    persist() {
+      try {
+        localStorage.setItem('feline_debug_log', JSON.stringify(this.events));
+      } catch (e) {}
+    }
+  };
+  window.exportDebugLog = () => {
+    console.log(`--- ${DebugLog.events.length} debug events ---`);
+    console.table(DebugLog.events);
+    return DebugLog.events;
   };
 
   function startSession() {
@@ -414,6 +452,7 @@
 
     AudioEngine.init();
     MotionSense.init();
+    DebugLog.start();
 
     sessionElapsedMs = 0;
     sessionCatchCount = 0;
@@ -454,6 +493,7 @@
     document.getElementById('end-catch-count').textContent = sessionCatchCount;
     document.getElementById('end-screen').style.display = 'flex';
     if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    DebugLog.persist();
   }
 
   function pauseSession() {
@@ -727,11 +767,13 @@
           latencyMs: latency,
           motionCorroborated
         });
+        DebugLog.log('touch_hit', { species: this.constructor.name, x: Math.round(px), y: Math.round(py), motionCorroborated });
 
         AudioEngine.playHit();
         sessionCatchCount++;
         return true;
       }
+      DebugLog.log('touch_miss', { species: this.constructor.name, x: Math.round(px), y: Math.round(py) });
       return false;
     }
   }
