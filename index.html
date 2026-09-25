@@ -198,6 +198,59 @@
     return { x: LIGHT_VEC.x * ca - LIGHT_VEC.y * sa, y: LIGHT_VEC.y * ca + LIGHT_VEC.x * sa };
   }
 
+  // --- SHARED PREY RENDER KIT ---
+  // Soft contact shadow under a prey creature: a radial gradient fading from
+  // translucent black at the center to fully transparent at the edge, drawn
+  // as a flattened ellipse on the "floor" beneath the sprite.
+  function drawPreyGroundShadow(cx, cy, drawScale, rx = 15, ry = 5, alpha = 0.32) {
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, drawScale * rx);
+    grad.addColorStop(0, `rgba(0, 0, 0, ${alpha})`);
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.save();
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, drawScale * rx, drawScale * ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // The "sphere shading" trick: a two-focal-point radial gradient whose near
+  // focus is offset toward the fixed world light (in the shape's local,
+  // pre-rotation frame) and whose far edge sits at coverRadius from the
+  // shape's own center. Painting a silhouette with this as fillStyle makes a
+  // flat 2D ellipse read as a lit 3D volume that turns correctly with the
+  // sprite, because the light itself never moves in world space.
+  function directionalBodyGradient(hue, angle, cx, cy, reachX, reachY, coverRadius, stops) {
+    const light = lightInLocalFrame(angle);
+    const s = Object.assign({ lightL: 78, midL: 55, darkL: 22, sat: [55, 88, 92] }, stops || {});
+    const focalX = cx + light.x * reachX;
+    const focalY = cy + light.y * reachY;
+    const grad = ctx.createRadialGradient(focalX, focalY, 0, cx, cy, coverRadius);
+    grad.addColorStop(0, `hsl(${hue}, ${s.sat[0]}%, ${s.lightL}%)`);
+    grad.addColorStop(0.55, `hsl(${hue}, ${s.sat[1]}%, ${s.midL}%)`);
+    grad.addColorStop(1, `hsl(${hue}, ${s.sat[2]}%, ${s.darkL}%)`);
+    return grad;
+  }
+
+  // Faint skin/dorsal banding: a handful of translucent vertical strokes at
+  // given local x-offsets (in drawScale units). The caller is expected to
+  // have already clipped to the creature's silhouette, so these just need to
+  // span a tall enough local y-range to cover it.
+  function drawSkinBanding(hue, drawScale, positions, halfHeightMult = 6.5, opacity = 0.32) {
+    ctx.save();
+    ctx.strokeStyle = `hsla(${hue}, 70%, 25%, ${opacity})`;
+    ctx.lineWidth = Math.max(1, drawScale * 1.0);
+    const halfH = drawScale * halfHeightMult;
+    positions.forEach(k => {
+      const x = drawScale * k;
+      ctx.beginPath();
+      ctx.moveTo(x, -halfH);
+      ctx.lineTo(x, halfH);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
   // --- SESSION STRUCTURE ---
   const SESSION_DURATION_MS = 6 * 60 * 1000; // placeholder default -- tune once
                                               // real session-length data exists
