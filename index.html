@@ -175,6 +175,14 @@
  *   a plain circle, and the gecko has googly eyes (pupils drift with travel
  *   direction) and simple back speckles. Purely cosmetic -- the feline-safe
  *   hue range, motion patterns, and hit/hide detection radii are untouched.
+ *
+ * v1.10 -- colour as an independent, per-cat randomisation variable:
+ *   Prey hue is no longer averaged from top trials (which pinned it to
+ *   green). Each session starts on a random colour, every kill forces a
+ *   visibly different colour, and a discounted Thompson-sampling bandit
+ *   over six hue bands learns the individual cat's colour preference
+ *   while a 20% exploration floor and posterior sampling keep it from
+ *   ever fully converging -- see Telemetry._nextHue().
  */
 (() => {
   const canvas = document.getElementById('gameCanvas');
@@ -313,13 +321,120 @@
       if (meanDeg < 0) meanDeg += 360;
       return meanDeg;
     },
+    // --- v1.10: COLOUR AS ITS OWN RANDOMISATION VARIABLE ---
+    // Colour is optimised per cat independently of speed/size, as a
+    // discounted Thompson-sampling bandit over hue bands inside the feline
+    // dichromatic range (yellow -> blue). Four rules keep it from ever
+    // settling into one colour:
+    //   1. The first prey of every session gets a uniformly random band.
+    //   2. After every kill the next prey must be a DIFFERENT band from the
+    //      last one, and at least HUE_MIN_STEP degrees away -- so the colour
+    //      visibly changes on every respawn (anti-habituation).
+    //   3. HUE_EXPLORE_FLOOR of picks ignore the learned preference entirely
+    //      and choose a random band, so no band is ever starved of data.
+    //   4. Old trials are discounted (HUE_DISCOUNT per newer trial), so the
+    //      learned preference can drift slowly if the cat's taste changes,
+    //      and posterior sampling keeps real uncertainty in every choice.
+    HUE_BANDS: [
+      { name: 'yellow',       lo: 60,  hi: 90 },
+      { name: 'yellow-green', lo: 90,  hi: 120 },
+      { name: 'green',        lo: 120, hi: 150 },
+      { name: 'teal',         lo: 150, hi: 180 },
+      { name: 'cyan',         lo: 180, hi: 210 },
+      { name: 'blue',         lo: 210, hi: 240 }
+    ],
+    HUE_EXPLORE_FLOOR: 0.2,
+    HUE_DISCOUNT: 0.97,   // half-life of ~23 catches
+    HUE_MIN_STEP: 25,
+    lastHue: null,
+    lastHueBand: null,
+    // Call at session start so the first prey's colour is uniformly random.
+    resetColourSequence() {
+      this.lastHue = null;
+      this.lastHueBand = null;
+    },
+    _bandOf(hue) {
+      return this.HUE_BANDS.findIndex(b => hue >= b.lo && hue < b.hi + (b.hi === 240 ? 1 : 0));
+    },
+    // Marsaglia-Tsang gamma sampler -> Beta sample, for Thompson sampling.
+    _gamma(k) {
+      if (k < 1) return this._gamma(k + 1) * Math.pow(Math.random(), 1 / k);
+      const d = k - 1 / 3, c = 1 / Math.sqrt(9 * d);
+      for (;;) {
+        let x, v;
+        do {
+          const u1 = Math.random() || 1e-12, u2 = Math.random();
+          x = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+          v = 1 + c * x;
+        } while (v <= 0);
+        v = v * v * v;
+        const u = Math.random();
+        if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+        if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+      }
+    },
+    _beta(a, b) {
+      const x = this._gamma(a), y = this._gamma(b);
+      return x / (x + y);
+    },
+    // Discounted Beta posterior per band. Reward = interaction attempts in
+    // the chase (1..8), normalised to 0..1, same signal as logTrial().
+    _hueBandPosteriors() {
+      const post = this.HUE_BANDS.map(() => ({ a: 1, b: 1, n: 0 }));
+      const trials = this.profile.trials;
+      for (let i = 0; i < trials.length; i++) {
+        const t = trials[i];
+        if (typeof t.hue !== 'number') continue;
+        const band = this._bandOf(t.hue);
+        if (band < 0) continue;
+        const w = Math.pow(this.HUE_DISCOUNT, trials.length - 1 - i);
+        const r = (Math.max(1, Math.min(t.attempts || 1, 8)) - 1) / 7;
+        post[band].a += w * r;
+        post[band].b += w * (1 - r);
+        post[band].n += w;
+      }
+      return post;
+    },
+    _nextHue() {
+      const bands = this.HUE_BANDS;
+      const allowed = bands.map((_, i) => i).filter(i => i !== this.lastHueBand);
+      let band, mode;
+      if (this.lastHueBand === null) {
+        band = allowed[Math.floor(Math.random() * allowed.length)];
+        mode = 'session-start-random';
+      } else if (Math.random() < this.HUE_EXPLORE_FLOOR) {
+        band = allowed[Math.floor(Math.random() * allowed.length)];
+        mode = 'explore';
+      } else {
+        const post = this._hueBandPosteriors();
+        let best = -1;
+        allowed.forEach(i => {
+          const draw = this._beta(post[i].a, post[i].b);
+          if (draw > best) { best = draw; band = i; }
+        });
+        mode = 'thompson';
+      }
+      // Random hue within the chosen band, kept at least HUE_MIN_STEP away
+      // from the previous prey so adjacent-band picks still read as a change.
+      const { lo, hi } = bands[band];
+      let hue = lo + Math.random() * (hi - lo);
+      for (let tries = 0; tries < 12 && this.lastHue !== null &&
+           Math.abs(hue - this.lastHue) < this.HUE_MIN_STEP; tries++) {
+        hue = lo + Math.random() * (hi - lo);
+      }
+      hue = Math.round(hue);
+      this.lastHue = hue;
+      this.lastHueBand = band;
+      DebugLog.log('prey_colour', { hue, band: bands[band].name, mode });
+      return hue;
+    },
     generateNextPreyParams() {
       // Epsilon-Greedy: 20% random exploration, 80% exploitation of best traits
       if (Math.random() < 0.2 || this.profile.trials.length < 5) {
         return {
           scaleMultiplier: Number((Math.random() * 0.7 + 0.7).toFixed(2)), // 0.7x to 1.4x
           speedMultiplier: Number((Math.random() * 1.4 + 0.8).toFixed(2)), // 0.8x to 2.2x
-          hue: Math.floor(Math.random() * 180 + 60) // 60° (Yellow) to 240° (Blue)
+          hue: this._nextHue()
         };
       } else {
         // Exploit: average the top-K trials rather than anchoring on a
@@ -346,12 +461,14 @@
 
         const avgScale = topK.reduce((s, t) => s + t.scaleMultiplier, 0) / topK.length;
         const avgSpeed = topK.reduce((s, t) => s + t.speedMultiplier, 0) / topK.length;
-        const avgHue = this._circularMeanHue(topK.map(t => t.hue));
 
         return {
           scaleMultiplier: Math.max(0.65, Number((avgScale + (Math.random() * 0.2 - 0.1)).toFixed(2))),
           speedMultiplier: Math.max(0.75, Number((avgSpeed + (Math.random() * 0.4 - 0.2)).toFixed(2))),
-          hue: Math.round((avgHue + (Math.random() * 20 - 10) + 360) % 360)
+          // Hue is deliberately NOT taken from topK any more (v1.10) -- see
+          // _nextHue(). Averaging hues across the 60-240 range collapsed to
+          // ~150 (green) almost every time, which is why colour looked stuck.
+          hue: this._nextHue()
         };
       }
     }
@@ -523,6 +640,9 @@
     document.getElementById('end-screen').style.display = 'none';
     document.getElementById('pause-overlay').style.display = 'none';
     document.getElementById('session-hud').style.display = 'flex';
+    // v1.10: every session opens on a uniformly random colour.
+    Telemetry.resetColourSequence();
+    activePrey = spawnPrey();
     isPaused = false;
   }
 
