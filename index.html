@@ -183,6 +183,19 @@
  *   over six hue bands learns the individual cat's colour preference
  *   while a 20% exploration floor and posterior sampling keep it from
  *   ever fully converging -- see Telemetry._nextHue().
+ *
+ * v1.11 -- more distinct freeze windows (habituation response):
+ *   A cat who tracks the prey intently but stops attempting to pounce is
+ *   a known failure mode for this genre -- continuous erratic motion gives
+ *   nothing for a predator to commit against, since real pounces are
+ *   triggered by a clear freeze/vulnerability window, not by motion itself.
+ *   Per-tick freeze probability while moving raised 0.012 -> 0.022 (freezes
+ *   trigger roughly twice as often), and freeze duration raised from
+ *   25-75 ticks (~0.4-1.25s) to 55-145 ticks (~0.9-2.4s) so each freeze
+ *   reads as a distinct, held-still target rather than a brief stutter.
+ *   Still inline constants -- the not-yet-built parameter registry
+ *   (project review S4 item 3) is what would make these independently
+ *   tunable/replayable instead of hand-edited.
  */
 (() => {
   const canvas = document.getElementById('gameCanvas');
@@ -885,9 +898,9 @@
 
         if (Math.random() < 0.02) AudioEngine.playSqueak();
 
-        if (Math.random() < 0.012) {
+        if (Math.random() < 0.022) {
           this.state = 'frozen';
-          this.stateTimer = Math.random() * 50 + 25;
+          this.stateTimer = Math.random() * 90 + 55;
           return;
         }
 
